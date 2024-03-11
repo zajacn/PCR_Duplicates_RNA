@@ -34,6 +34,9 @@ library(UpSetR)
 library(pheatmap)
 library(ggvenn)
 library(umap)
+library(rstatix)
+library(viridis)
+library(cartography)
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, knitr.table.format = "html")
 #BPPARAM <- MulticoreParam(workers = 4)
 #register(BPPARAM)
@@ -168,6 +171,7 @@ xLong <- reshape2::melt(xx[,c("Sample", "Sequencer", "amountFac", "Cycles Catego
 xLong$Sample <- factor(xLong$Sample, levels=unique(xx$Sample))
 xLong$PCR <- as.character(xLong$`Cycles Category`)
 
+OUT = createWorkbook()
 ```
 
 ## Figure 2
@@ -179,6 +183,12 @@ ggplot(xLong, aes(x=`Cycles Category`, y=value, fill=variable)) +
   scale_fill_discrete("Category",labels=c('unique reads mapped and counted', 'unique reads mapped and not counted', "duplicate reads mapped", "unmapped reads", "low quality reads", "reads < 18bp")) +
   labs(y = "Proportion", x = "PCR Cycles Category") + theme(axis.text.x = element_text(size = 12), strip.text = element_text(size = 15), legend.text = element_text(size = 18), legend.title = element_text(size = 18), legend.position = "top")
 dev.off()
+```
+
+```{r , echo=FALSE}
+#save the data
+addWorksheet(OUT, "Figure2 data")
+writeData(OUT, sheet = "Figure2 data", x = xLong %>% mutate(ReadCount = value, Category = variable) %>% dplyr::select(-value, -variable, -PCR))
 ```
 
 ##Figure 3
@@ -228,6 +238,11 @@ ggplot(mismatchRate, aes(x=Sample, y=value, group=variable, color=variable)) +
   labs(x="SampleID", y = "Qualimap Mismatch Rate", color = "Sequencer") + 
   scale_color_manual(values = c('chartreuse','darkslateblue', "darkorange","deeppink3"))
 dev.off()
+```
+
+```{r, echo=FALSE}
+addWorksheet(OUT, "Figure3 data")
+writeData(OUT, sheet = "Figure3 data", x = mismatchRate %>% mutate(MismatchRate = value, Sequencer = variable) %>% dplyr::select(-value, -variable))
 ```
 
 ## Figure 4
@@ -284,6 +299,13 @@ ggplot(contamination, aes(Amount, mean, fill = name)) +
 dev.off()
 ```
 
+
+```{r , echo=FALSE}
+addWorksheet(OUT, "Figure4 data")
+writeData(OUT, sheet = "Figure4 data", x = contamination %>% mutate(Genus = name, average_abundance = mean) %>% dplyr::select(-name, -mean))
+```
+
+
 ### Figure 5
 ```{r, fig.width = 12, fig.height = 4, echo=FALSE}
 pdf("Figures/Figure5.pdf", width = 12, height = 4)
@@ -299,6 +321,10 @@ ggplot(tablex, aes(x = amountFac, y = ReadNumber, color = Sequencer, group = Seq
 dev.off()
 ```
 
+```{r , echo=FALSE}
+addWorksheet(OUT, "Figure5 data")
+writeData(OUT, sheet = "Figure5 data", x = tablex %>% dplyr::select(Id, Amount, cycles, Sequencer, ReadNumber))
+```
 
 ## Figure 6
 ```{r, fig.width = 14, fig.height = 5, echo=FALSE}
@@ -319,6 +345,11 @@ pdf("Figures/Figure6.pdf", height = 5, width = 14)
 F2
 dev.off()
 ```
+```{r , echo=FALSE}
+addWorksheet(OUT, "Figure6 data")
+writeData(OUT, sheet = "Figure6 data", x = df1 %>% mutate(PercentageReadsMapped = value) %>% dplyr::select(-value))
+```
+
 
 ### Figure 7
 ```{r , fig.width = 14, fig.height=8, echo=FALSE}
@@ -355,12 +386,15 @@ ggplot(melt(tptUse) %>% rownames_to_column(), aes(value, Var1, fill = Var2)) +
   theme(axis.text.y = element_text(size = 17), legend.text = element_text(siz = 11), axis.title.x = element_text(size = 15))
 dev.off()
 ```
+```{r , echo=FALSE}
+addWorksheet(OUT, "Figure7 data")
+writeData(OUT, sheet = "Figure7 data", x = ezFrame(tptUse), rowNames = TRUE)
+```
+
 
 ## Figure 8
 ```{r , fig.width = 11, fig.height=7, echo=FALSE}
-library(rstatix)
-library(viridis)
-library(cartography)
+
 df = tablex[tablex$amountFac != "NC", c("amountFac", "Cycles Category", "Sample", "Sequencer", "Detected_genes")]
 df$Amount = factor(df$amountFac, levels = c("1", "2", "4", "7","15","31", "62", "125", "250", "500","1000"))
 df  = df %>% dplyr::rename("CyclesCategory" = "Cycles Category") %>% dplyr::rename("Genes" = 'Detected_genes')
@@ -403,8 +437,13 @@ median(unlist(list_of_NX))
 median(unlist(list_of_N6))
 
 ```
+```{r , echo=FALSE}
+addWorksheet(OUT, "Figure8 data")
+writeData(OUT, sheet = "Figure8 data", x = df %>% dplyr::select(-amountFac, -inter))
+```
 
 ##Figure 9
+
 ```{r , fig.width = 7, fig.height=8, echo=FALSE}
 
 p = ggplot(tablex[tablex$Amount != "0",], aes(factor(amountFac,levels= c("1", "2", "4", "7", "15", "31", "62", "125", "250", "500", "1000")), Proportion_of_reads_removed, color=`Cycles Category`, shape=Sequencer, group = interaction(`Cycles Category`, Sequencer))) + geom_point(size = 2) + labs(x = "Amount", y = "Percentage of duplicates", color = "PCR Cycles Category") + guides(color = guide_legend(override.aes = list(size = 5)), shape = guide_legend(override.aes = list(size = 5))) + geom_line() + scale_color_manual(values = c("skyblue", "yellowgreen", "orangered")) 
@@ -415,7 +454,13 @@ plot_grid(p, p1, ncol = 1)
 dev.off()
 ```
 
+```{r , echo=FALSE}
+addWorksheet(OUT, "Figure9 data")
+writeData(OUT, sheet = "Figure9 data", x = tablex %>% dplyr::select(Id, Amount, cycles, Sequencer, Proportion_of_reads_removed, Detected_genes))
+```
+
 ##Figure 10
+
 ```{r , fig.align = "center", fig.width = 20, fig.height=16, echo=FALSE, out.width='\\textwidth'}
 dfgenes = NULL
 for (i in colnames(dedupCounts)) {
@@ -454,10 +499,10 @@ venn4
 dev.off()
 ```
 
-
 ##Figure 11
+
 ```{r , fig.width = 10, fig.height=7, echo=FALSE}
-library(cartography)
+
 columns_of_interest = colnames(dedupCounts)[!grepl("^0_", colnames(dedupCounts))]
 countsPCA = dedupCounts[, columns_of_interest]
 readCds <- DGEList(counts = countsPCA, group = factor(sampleInfo$amountFac[!grepl("^NC", sampleInfo$amountFac)], levels = c("1", "2", "4", "7","15","31", "62", "125", "250", "500","1000")), samples = sampleInfo$Id[!grepl("^0_", sampleInfo$Id)])
@@ -480,6 +525,10 @@ ggplot(umapx, aes(X1, X2, color = amountFac, shape = Sequencer)) +
   guides(shape = guide_legend(override.aes = list(size = 5)), color = guide_legend(override.aes = list(size = 5))) + 
   labs (color = "Amount", size = "PCR Cycles Category", shape = "Sequencer")
 dev.off()
+```
+```{r , echo=FALSE}
+addWorksheet(OUT, "Figure11 data")
+writeData(OUT, sheet = "Figure11 data", x = umapx)
 ```
 
 ##Figure 12
@@ -530,6 +579,12 @@ pheatmap(logRatio[, df[with(df, order(amountFac, CyclesCategory, Sequencer)),]$I
 )
 dev.off()
 ```
+
+```{r , echo=FALSE}
+addWorksheet(OUT, "Figure12 data")
+writeData(OUT, sheet = "Figure12 data", x = logRatio[, df[with(df, order(amountFac, CyclesCategory, Sequencer)),]$Id], rowNames = TRUE)
+```
+
 
 ##Figure 13
 
@@ -586,7 +641,35 @@ for (i in levels(comb_allseq$amount)) {
 dev.off()
 ```
 
+```{r , echo=FALSE}
+addWorksheet(OUT, "Figure13 data")
+writeData(OUT, sheet = "Figure13 data", x = comb_allseq %>% mutate(count = value) %>% dplyr::select(-value))
+```
+
+For creating a gif:
+
+```{r , fig.width = 15, fig.height=15, echo=FALSE}
+finaldf = NULL
+for (i in levels(comb_allseq$amount)) {
+  
+  cycles_max <- max(unique(comb_allseq[comb_allseq$amount == i,]$cycles))
+  cycles_min <- min(unique(comb_allseq[comb_allseq$amount == i,]$cycles))
+  X <- comb_allseq[comb_allseq$amount == i & comb_allseq$cycles %in% c(cycles_max, cycles_min),]
+  X <- merge(X[X$cycles == cycles_max,] %>% dplyr::select(value, amount, Sequencer, Gene_names) %>% rename("value_HC" = "value"), X[X$cycles == cycles_min,] %>% dplyr::select(value, amount, Sequencer, Gene_names) %>% rename("value_LC" = "value"), by = c("Gene_names", "amount", "Sequencer"))
+  X$amount = i
+  finaldf = rbind(finaldf,X)
+}
+
+finaldf$amount = factor(finaldf$amount, levels = c("1", "2", "4", "7", "15", "31", "62", "125", "250", "500", "1000"))
+
+p2 = ggplot(finaldf, aes(value_HC + 5, value_LC + 5, color = Sequencer)) + geom_point(size = 2.5) + scale_x_log10() + scale_y_log10() + geom_abline(slope=1, linetype = "dashed", color="red") +  scale_color_manual(values = c('chartreuse','darkslateblue', "darkorange","deeppink3")) + geom_text(aes(x = 10000, y = 500, label = as.factor(amount)), alpha = 0.2,  col = "gray", size = 20) + xlab("HIGH") + ylab("LOW") + transition_states(as.factor(amount), state_length = 65)
+
+p2
+```
+
+
 ##Figure 14
+
 ```{r , fig.width = 8, fig.height=3, echo=FALSE}
 percTop <- as.data.frame(apply(dedupCounts, 2, function(x) (sum(sort(x, decreasing = TRUE)[1:20]) / sum(x))* 100)) %>% rownames_to_column()
 colnames(percTop) = c("Sample", "PercTopCounts")
@@ -603,8 +686,13 @@ ggplot(percTop, aes(Amount, PercTopCounts, color = `Cycles Category`, shape = Se
 dev.off()
 ```
 
+```{r , echo=FALSE}
+addWorksheet(OUT, "Figure14 data")
+writeData(OUT, sheet = "Figure14 data", x = percTop %>% dplyr::select(-amountFac))
+```
 
 ##Figure 15
+
 ```{r , fig.width = 13, fig.height=4, echo=FALSE}
 dataInfoSorted <- dataInfo[dataInfo$Amount != "0",]
 dataInfoSorted <- dataInfoSorted[ order(dataInfoSorted$Amount, dataInfoSorted$`Cycles Category`), ]
@@ -632,7 +720,7 @@ xLong <- rbind(xLong1, xLong2)
 
 xLong <- xLong %>% separate(Var2, c("amountFac", "Cycles Category"), " ")
 xLong$amountFac <- factor(xLong$amountFac, levels=c("1", "2", "4", "7", "15", "31", "62", "125", "250", "500", "1000"))
-xLong$`Cycles Category` = factor(xLong$`Cycles Category`, levels = c("LOW", "INTERMEDIATE", "HIGH"))
+xLong$`Cycles Category` = factor(xLong$`Cycles Category`, levels = c("LOW", "MID", "HIGH"))
 
 pdf("Figures/Figure15.pdf", width = 13, height = 4)
 ggplot(xLong %>% group_by(amountFac, `Cycles Category`, type) %>% summarise(median = median(value)), 
@@ -646,6 +734,10 @@ ggplot(xLong %>% group_by(amountFac, `Cycles Category`, type) %>% summarise(medi
 dev.off()
 ```
 
+```{r , echo=FALSE}
+addWorksheet(OUT, "Figure15 data")
+writeData(OUT, sheet = "Figure15 data", x = xLong %>% group_by(amountFac, `Cycles Category`, type) %>% summarise(median = median(value)) %>% data.frame())
+```
 
 ##Figure 16
 ```{r , fig.width = 10, fig.height=5, echo=FALSE}
@@ -733,5 +825,9 @@ setHook("grid.newpage", NULL, "replace")
 grid.text("GC content", x = 0.85 , rot=-90, gp=gpar(fontsize=16))
 ```
 
-
+```{r , echo=FALSE}
+addWorksheet(OUT, "Figure16 data")
+writeData(OUT, sheet = "Figure16 data", x = log2(GCTable[ , df[with(df, order(amountFac, `Cycles Category`, Sequencer)),]$Id] + 0.02), rowNames = TRUE)
+saveWorkbook(OUT, "Figures/Figures.data.xlsx")
+```
 
