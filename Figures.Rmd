@@ -1,0 +1,1004 @@
+---
+title:  "PCR Duplication rates"
+author: "Natalia Zajac/ Hubert Rehrhauer"
+output:
+  html_document: 
+    highlight: pygments
+    theme: sand
+    code_folding: hide
+    toc: yes
+    toc_depth: 4
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(ggplot2)
+library(plotly)
+library(ggrepel)
+library(ggpubr)
+library(grid)
+library(gridExtra)
+library(ezRun)
+library(ggtreeExtra)
+library(ggtree)
+library(dplyr)
+library(tidyverse)
+library(cowplot)
+library(scales)
+library(DESeq2)
+library(EnhancedVolcano)
+library(edgeR)
+library(UpSetR)
+library(pheatmap)
+library(ggvenn)
+library(umap)
+library(rstatix)
+library(viridis)
+library(factoextra)
+library(openxlsx)
+library(ggh4x)
+library(variancePartition)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, knitr.table.format = "html")
+#BPPARAM <- MulticoreParam(workers = 4)
+#register(BPPARAM)
+```
+
+
+```{r, echo=FALSE}
+#load Counts and sample metdata
+
+baseDir <- "/srv/GT/analysis/zajacn/p2220"
+dedupFolders <- c(Novaseq6000="o31444/o31444_NovaSeq_NOV1703_subsampled_dedup",
+                         Aviti="o31444_Aviti/Aviti_p2220_o31444_subsampled_dedup",
+                         G4="o31444_G4/G4_p2220_o31444_subsampledv2_dedup",
+                         NovaseqX="o31444_NovaseqX_100bp/dedup")
+geneAnno <- ezRead.table("/srv/GT/reference/Homo_sapiens/GENCODE/GRCh38.p13/Annotation/Release_42-2023-01-30/Genes/genes_annotation_byGene.txt")
+protcodingAnno <- geneAnno[geneAnno$type == "protein_coding",]
+
+
+tablex = data.frame()
+for (nm in names(dedupFolders)){
+  file = list.files(path = file.path(baseDir, dedupFolders[nm]), 
+                    pattern = "flagstat.primary.summary.table.txt", full.names = TRUE)
+  table <- ezRead.table(file)
+  table$removed <- table$ReadsIn - table$ReadsOut
+  table$Proportion_of_reads_removed <- (table$removed/table$ReadsIn)*100
+  table <- table %>% rownames_to_column() %>% separate(rowname, c("Amount", "cycles"), "_")
+  table = table %>% mutate(Sequencer = nm)
+  table$cycles <- as.integer(table$cycles)
+  table$Prededuplication <- (table$ReadsIn/table$ReadNumber)*100
+  table$Postdeduplication <- (table$ReadsOut/table$ReadNumber)*100
+  tablex = rbind(tablex,table)
+}
+
+sampleInfo <- tablex[,c(1,2,8)] %>% 
+  mutate(Id = paste0(Amount, "_", cycles, "_", Sequencer)) %>% 
+  mutate(amountFac= if_else(Amount == "0", "NC", Amount))
+sampleInfo$amountFac <- sampleInfo$amountFac %>%
+  factor(levels= c("NC", "1", "2", "4", "7", "15", "31", "62", "125", "250", "500", "1000"))
+sampleInfo$`Cycles Category` = ""
+
+for (i in unique(sampleInfo$Amount)){
+  sampleInfo[(sampleInfo$Amount == i) & (sampleInfo$cycles == min(as.integer(sampleInfo[sampleInfo$Amount == i,]$cycles))),"Cycles Category"] <- "LOW"
+  sampleInfo[(sampleInfo$Amount == i) & (sampleInfo$cycles == max(as.integer(sampleInfo[sampleInfo$Amount == i,]$cycles))),"Cycles Category"] <- "HIGH"
+  sampleInfo[(sampleInfo$Amount == i) & (sampleInfo$`Cycles Category` == ""),"Cycles Category"] <- "MID"
+}
+sampleInfo$`Cycles Category` <- factor(sampleInfo$`Cycles Category`, levels=c("LOW", "MID", "HIGH"))
+sampleInfo$Sample = paste0(sampleInfo$Amount, "_", sampleInfo$cycles)
+tablex = merge(tablex, sampleInfo, by = c("Amount", "cycles", "Sequencer"))
+
+
+rawCounts <- NULL
+dedupCounts <- NULL
+dataInfo <- NULL
+nm <- names(dedupFolders[1])
+for (nm in names(dedupFolders)){
+  file = list.files(path = file.path(baseDir, dedupFolders[nm]), 
+                    pattern = "featurecounts.pre.post.combined.txt", full.names = TRUE)
+  combinedMatrix <- ezRead.table(file, quote="\"") ## why is that matrix quoted???
+  x <- combinedMatrix[ , grep("_pre", colnames(combinedMatrix))]
+  colnames(x) <- sub("pre", nm, colnames(x))
+  if (is.null(rawCounts)){
+    rawCounts <- x
+  } else {
+    rawCounts <- cbind(rawCounts, x)
+  }
+  x <- combinedMatrix[ , grep("_post", colnames(combinedMatrix))]
+  colnames(x) <- sub("post", nm, colnames(x))
+  if (is.null(dedupCounts)){
+    dataInfo <- ezFrame(sampleInfo)
+    dedupCounts <- x
+  } else {
+    dedupCounts <- cbind(dedupCounts, x)
+    dataInfo <- rbind(dataInfo, ezFrame(sampleInfo))
+  }
+}
+dataInfo = dataInfo[!duplicated(dataInfo),]
+stopifnot(setequal(dataInfo$Id, colnames(dedupCounts)))
+stopifnot(rownames(protcodingAnno) %in% rownames(dedupCounts))
+
+dedupCounts <- as.matrix(dedupCounts[ rownames(protcodingAnno), dataInfo$Id])
+rawCounts <- as.matrix(rawCounts[ rownames(protcodingAnno), dataInfo$Id])
+
+isAllPresent <- apply(dedupCounts[,colnames(dedupCounts)[!grepl("^0_", colnames(dedupCounts))]] > 0, 1, all)
+sum(isAllPresent)
+
+tablex = merge(tablex, as.data.frame(colSums(dedupCounts > 0)), by.x = "Id", by.y = "row.names") %>% dplyr::rename("Detected_genes" = 'colSums(dedupCounts > 0)')
+
+amount_colors <- c("#B6EFB6", "#A8DDB2","#9BCBAE","#8EB9AA", "#81A7A6" ,"#7190A1","#5F799C", "#4E6197","#374685", "#1F2A70","#080E5B")
+cycles_colors = c("skyblue","yellowgreen","orangered")
+
+```
+
+
+```{r, echo=FALSE}
+
+#load mapping data
+starFolders <- 
+  c(Novaseq6000="/srv/gstore/projects/p2220/o31444_STAR_markdups_Novaseq_subsampled_2023-08-24--10-13-19",
+                         Aviti="/srv/gstore/projects/p2220/STAR_markdups_Aviti_subsampled_2023-08-24--10-09-41",
+                         G4="/srv/gstore/projects/p2220/STAR_markdups_G4_subsampled_2023-08-24--10-16-09",
+                         NovaseqX="/srv/gstore/projects/p2220/o31444_STAR_cutto100bp_2023-12-07--17-39-06")
+
+
+readCountList <- list()
+for (seqr in names(starFolders)){
+  starDsFile <- file.path(starFolders[seqr], "dataset.tsv")
+  starDs <- ezRead.table(starDsFile)
+  rownames(starDs) <- sub("_S.*", "", rownames(starDs))
+  stopifnot(setequal(sampleInfo$Sample, rownames(starDs)))
+  sm <- sampleInfo$Sample[1]
+  resList <- list()
+  for (sm in sampleInfo$Sample){
+    logFile <- file.path("/srv/gstore/projects", starDs[sm, "PreprocessingLog [File]"])
+    logLines <- readLines(logFile, warn = FALSE)
+    jsonStart <- grep("^\\{", logLines)
+    x <- jsonlite::fromJSON(paste(logLines[jsonStart:length(logLines)], collapse="\n"))
+    nReads <- x$summary$before_filtering$total_reads
+    xStat <- c(Sequencer=seqr, total_reads=nReads, x$filtering_result)
+    resList[[sm]] <- xStat
+  }
+  readCountList[[seqr]] <- rbindlist(resList, idcol="Sample") %>% data.frame()
+}
+
+readCounts <- rbindlist(readCountList) %>% data.frame()
+readCounts$all_low_quality_reads <- readCounts$low_quality_reads + readCounts$too_many_N_reads
+readCounts$low_quality_reads <- NULL
+readCounts$too_many_N_reads <- NULL
+readCounts$too_long_reads <- NULL
+
+xx = merge(tablex, readCounts, by = c("Sample", "Sequencer"))
+xx = merge(xx, round(colSums(dedupCounts)), by.x = "Id", by.y = "row.names") %>% dplyr::rename("uniqueMappedCounted" = "y")
+xx$uniqueMappedNotCounted <- round(xx$ReadsOut - xx$uniqueMappedCounted)
+xx$dupsMapped <- xx$ReadsIn - xx$ReadsOut
+xx$unMapped <- xx$passed_filter_reads - xx$ReadsIn
+xx$lowQuality <- xx$all_low_quality_reads
+xx$tooShort <- xx$too_short_reads
+xLong <- reshape2::melt(xx[,c("Sample", "Sequencer", "amountFac", "Cycles Category", "uniqueMappedCounted",  "uniqueMappedNotCounted", "dupsMapped", "unMapped", "lowQuality", "tooShort")])
+xLong$Sample <- factor(xLong$Sample, levels=unique(xx$Sample))
+xLong$PCR <- as.character(xLong$`Cycles Category`)
+
+OUT = createWorkbook()
+```
+
+# {.tabset}
+
+## Figure 2A
+
+```{r , fig.width = 19, fig.height=13, echo=FALSE}
+pdf("Figures/Figure2A.pdf", width = 18, height = 12)
+ggplot(xLong, aes(x=`Cycles Category`, y=value, fill=variable)) + 
+  geom_bar(stat="identity", position="fill") + 
+  facet_grid(rows = vars(Sequencer), cols = vars(amountFac)) +
+  scale_fill_discrete("Category",labels=c('unique reads mapped and counted', 'unique reads mapped and not counted', "duplicate reads mapped", "unmapped reads", "low quality reads", "reads < 18bp")) +
+  labs(y = "Proportion", x = "PCR Cycles Category") + theme(axis.text.x = element_text(size = 12), strip.text = element_text(size = 15), legend.text = element_text(size = 18), legend.title = element_text(size = 18), legend.position = "top", axis.title.y = element_text(size = 15))
+dev.off()
+```
+
+```{r , echo=FALSE}
+#save the data
+addWorksheet(OUT, "SuppTbl1")
+writeData(OUT, sheet = "SuppTbl1", x = tablex)
+```
+
+## Figure 2B
+
+```{r , fig.width = 9, fig.height=4, echo=FALSE}
+#Run qualimap
+resBaseDir <- "/srv/GT/analysis/p2220/PCR-duplicates-study/qualimap_NovaseqX100bp/"
+# if (!file.exists(resBaseDir)){
+#   dir.create(resBaseDir, recursive = TRUE)
+# }
+# 
+# for (seqr in names(starFolders)){
+#   starDsFile <- file.path(starFolders[seqr], "dataset.tsv")
+#   starDs <- ezRead.table(starDsFile)
+#   rownames(starDs) <- sub("_S.*", "", rownames(starDs))
+#   stopifnot(setequal(sampleInfo$Sample, rownames(starDs)))
+#   for (sm in sampleInfo$Sample){
+#     bamFile <- file.path("/srv/gstore/projects", starDs[sm, "BAM [File]"])
+#     resDir <- paste0(resBaseDir, "/", sm, "_", seqr)
+#     message(resDir)
+#     cmd <- paste("unset DISPLAY; /usr/local/ngseq/packages/QC/Qualimap/2.2.1/qualimap bamqc -bam", bamFile, "--java-mem-size=4G", "-c -nw 400 -hm 3 -nt 8", "-outdir", resDir)
+#     ezSystem(cmd)
+#     }
+# }
+
+mismatchRate <- ezMatrix(NA, rows=unique(sampleInfo$Sample), cols=names(starFolders))
+for (seqr in names(starFolders)){
+    for (sm in sampleInfo$Sample){
+        resDir <- paste0(resBaseDir, "/", sm, "_", seqr)
+        genomeResFile <- paste0(resDir, "/genome_results.txt")
+        x <- readLines(genomeResFile)
+        errorRate <- grep("general error rate = ", x, value=TRUE) %>% sub(".*= ", "", x=.) %>% as.double()
+        mismatchRate[sm, seqr] <- errorRate
+    }
+}
+mismatchRate = merge(data.frame(mismatchRate), sampleInfo[,c("amountFac", "Cycles Category", "Sample")], by.x = "row.names", by.y = "Sample")
+mismatchRate = mismatchRate[!duplicated(mismatchRate),]
+mismatchRate$Sample = paste0(mismatchRate$amountFac, "_", mismatchRate$`Cycles Category`)
+mismatchRate = mismatchRate[,c("Sample", "Novaseq6000", "Aviti", "G4", "NovaseqX")]
+mismatchRate = reshape2::melt(mismatchRate, id.vars = "Sample")
+mismatchRate$Sample = factor(mismatchRate$Sample, levels = unique(paste0(dataInfo[with(dataInfo, order(amountFac, `Cycles Category`)),]$amountFac, "_", dataInfo[with(dataInfo, order(amountFac, `Cycles Category`)),]$`Cycles Category`)))
+mismatchRate$variable = factor(mismatchRate$variable, levels = c("Aviti", "G4", "Novaseq6000", "NovaseqX"))
+
+pdf("Figures/Figure2B.pdf", width = 7, height = 7)
+ggplot(mismatchRate, aes(x=Sample, y=value, group=variable, color=variable)) +
+  geom_step(position="jitter", direction="mid") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1), axis.title.y = element_text(size =15),legend.text = element_text(size = 15), legend.title = element_text(size = 15), legend.position = "top") + 
+  labs(x="SampleID", y = "Qualimap Mismatch Rate", color = "Sequencer") + 
+  scale_color_manual(values = c('chartreuse','darkslateblue', "darkorange","deeppink3"))
+dev.off()
+```
+
+```{r, echo=FALSE}
+addWorksheet(OUT, "SuppTbl2")
+writeData(OUT, sheet = "SuppTbl2", x = mismatchRate %>% mutate(MismatchRate = value, Sequencer = variable) %>% dplyr::select(-value, -variable))
+```
+
+## Figure 2C
+
+```{r , fig.width = 18, fig.height=13, echo=FALSE}
+all_bracken = NULL
+for (dir in list.dirs()[ grepl("contamination$", list.dirs()) ]){
+  bracken = NULL
+  for (x in list.files(dir, pattern = "txt.bracken")){
+    X = read.delim(paste0(dir,"/",x)) %>% mutate(name = if_else(name == "Homo", "Homo sapiens", name))
+    X$SampleID = str_split(x, "_S[1-9]+")[[1]][1]
+    bracken = rbind(bracken, X)
+  }
+  bracken$Sequencer = str_split(dir, "/")[[1]][2]
+  all_bracken = rbind(all_bracken, bracken)
+}
+all_bracken = all_bracken[all_bracken$fraction_total_reads > 0.001,]
+
+all_kraken = NULL
+for (dir in list.dirs()[ grepl("contamination$", list.dirs()) ]){
+  X = read.delim(paste0(dir,"/kraken_read_summary.txt"), header = FALSE)
+  colnames(X) = c("SampleID", "Classified", "Unclassified")
+  X$Sequencer = str_split(dir, "/")[[1]][2]
+  all_kraken = rbind(all_kraken, X)
+}
+all_kraken$SampleID = str_remove(all_kraken$SampleID, "_S[1-9]+")
+
+all_bracken = all_bracken[,c(1,6,8,9)]
+all_kraken = all_kraken[,c(1,3,4)] %>% dplyr::rename("new_est_reads" = "Unclassified") %>% mutate(name = "Unclassified")
+contamination = rbind(all_bracken, all_kraken)
+
+contamination = contamination %>% 
+  mutate(Sequencer = case_when(Sequencer == "o31444_Aviti" ~ "Aviti",
+                                          Sequencer == "o31444_G4" ~ "G4",
+                                          Sequencer == "o31444_NovaseqX" ~ "NovaseqX",
+                                          Sequencer == "o31444" ~ "Novaseq6000")) %>% 
+  separate(SampleID, into = c("Amount", "cycles"), sep = "_")
+contamination$name = factor(contamination$name, levels = unique(contamination[order(contamination$new_est_reads, decreasing = T),]$name))
+contamination$Amount <- str_replace(as.character(contamination$Amount), "^0$", "NC")
+contamination$Amount = factor(contamination$Amount , levels = c("NC", "1", "2", "4", "7", "15", "31", "62", "125", "250", "500", "1000"))
+contamination = contamination %>% group_by(Amount, Sequencer, name) %>% summarise(mean = mean(new_est_reads))
+
+pdf("Figures/Figure2C.pdf", width = 18, height = 10)
+ggplot(contamination, aes(Amount, mean, fill = name)) + 
+  geom_bar(position = "fill", stat = "identity") + 
+  facet_wrap(~Sequencer) + ylab("Total") + 
+  theme(title = element_text(size = 25), 
+        axis.text.x = element_text(size = 12), 
+        axis.text.y = element_text(size = 15), 
+        legend.text = element_text(size = 13), 
+        strip.text = element_text(size=25)) + 
+  labs(fill="Read Classification") +
+  scale_fill_manual(values = sample(ezRun::brewPalette(n=150),85)) + 
+  guides(fill = guide_legend(ncol = 3))
+dev.off()
+```
+
+
+```{r , echo=FALSE}
+addWorksheet(OUT, "SuppTbl3")
+writeData(OUT, sheet = "SuppTbl3", x = contamination %>% mutate(Genus = name, average_abundance = mean) %>% dplyr::select(-name, -mean))
+```
+
+## Figure 3A
+
+```{r , fig.width = 14, fig.height=8, echo=FALSE}
+if(!exists("dataset")){
+  dataset <- readRDS("/srv/gstore/projects/p2220/RNABamStats_2023-12-09--17-33-58/RNA_BAM_Statistics/dataset.rds")
+}
+if(!exists("param")){
+  param <- readRDS("/srv/gstore/projects/p2220/RNABamStats_2023-12-09--17-33-58/RNA_BAM_Statistics/param.rds")
+}
+if(!exists("resultList")){
+  resultList <- readRDS("/srv/gstore/projects/p2220/RNABamStats_2023-12-09--17-33-58/RNA_BAM_Statistics/resultList.rds")
+}
+
+conds = ezConditionsFromDataset(dataset, param=param)
+samples = rownames(dataset)
+sampleColors = getSampleColors(conds, samples)
+bamFiles = dataset$BAM
+
+nm="multiMatchTargetTypeCounts"
+tct = getTypeCountTable(resultList, nm)
+tpt = as.matrix(tct)
+for (cn in colnames(tpt)){
+    tpt[ ,cn] = tct[ ,cn]/ tct["total", cn] * 100
+}
+eliminate = c(rownames(tpt)[grepl("chr", rownames(tpt))], rownames(tpt)[grepl("IG_", rownames(tpt))], rownames(tpt)[grepl("TR_", rownames(tpt))], "total", "transcribed_processed_pseudogene", "TEC", "transcribed_unprocessed_pseudogene", "transcribed_unitary_pseudogene", "vault_RNA", "ribozyme", "snRNA", "rRNA", "miRNA", "misc_RNA", "snoRNA", "scaRNA", "sRNA", "scRNA", "Mt_tRNA")
+tptUse = tpt[rownames(tpt)[!rownames(tpt) %in% eliminate],]
+tptUse = tptUse[,c(colnames(tptUse)[grepl("^0_", colnames(tptUse))], colnames(tptUse)[grepl("^1000_6", colnames(tptUse))], colnames(tptUse)[grepl("^1000_8", colnames(tptUse))], colnames(tptUse)[grepl("^1000_10", colnames(tptUse))])]
+
+tptUse2 = melt(tptUse) %>% rownames_to_column() %>% mutate(Id = paste0(sapply(str_split(Var2, "\\."), .subset, 1), "_", sapply(str_split(Var2, "\\."), .subset, 2))) %>% left_join(sampleInfo)
+tptUse2$`Cycles Category` = factor(tptUse2$`Cycles Category` , levels = c("LOW", "MID", "HIGH"))
+
+pdf("Figures/Figure3A.pdf", height = 10, width = 8)
+ggplot(tptUse2, aes(Var1, Sequencer, fill = value)) + geom_tile() + geom_text(aes(label = round(value, 1))) +
+    scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 45) + 
+    facet_grid2(
+        factor(paste(Amount,`Cycles Category`), levels = c("0 LOW", "0 MID", "0 HIGH", "1000 LOW", "1000 MID", "1000 HIGH")) ~ ., 
+        scales = "free", 
+        space = "free", 
+        switch = "x"
+    ) + 
+    labs(fill = "Percentage", x = "", y = "") + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 14), axis.text.y = element_text(size = 14), strip.text = element_text(size = 14), legend.title = element_text(size = 12)) 
+dev.off()
+```
+
+
+```{r , echo=FALSE}
+addWorksheet(OUT, "SuppTbl4")
+writeData(OUT, sheet = "SuppTbl4", x = ezFrame(tptUse), rowNames = TRUE)
+saveWorkbook(OUT, "Figures/Supplementary.data.xlsx")
+```
+
+
+##Figure 3B
+
+```{r , fig.width = 10, fig.height=6, echo=FALSE}
+
+max_dup <- max(tablex$Proportion_of_reads_removed, na.rm = TRUE)
+max_genes <- max(tablex$Detected_genes, na.rm = TRUE)
+
+# Create the combined plot
+p_combined <- ggplot(tablex[tablex$Amount != "0",], 
+                     aes(x = factor(amountFac, levels= c("1", "2", "4", "7", "15", "31", "62", "125", "250", "500", "1000")),
+                         color = `Cycles Category`, 
+                         shape = Sequencer, 
+                         group = interaction(`Cycles Category`, Sequencer))) + 
+    
+    # First Y-axis: Percentage of duplicates
+    geom_point(aes(y = Proportion_of_reads_removed), size = 2) +
+    geom_line(aes(y = Proportion_of_reads_removed), linetype = "solid") +
+    
+    # Second Y-axis: Detected genes (scaled)
+    geom_point(aes(y = Detected_genes / max_genes * max_dup), size = 2) +
+    geom_line(aes(y = Detected_genes / max_genes * max_dup), linetype = "dashed") +
+    
+    # Labels and scaling
+    scale_y_continuous(name = "Percentage of duplicates", 
+                       sec.axis = sec_axis(~ . * max_genes / max_dup, name = "Number of detected genes")) +
+    
+    # Manual color mapping
+    scale_color_manual(values = c("skyblue", "yellowgreen", "orangered")) +
+    
+    # Labels and legend formatting
+    labs(x = "Amount", color = "PCR Cycles Category") +
+    guides(color = guide_legend(override.aes = list(size = 5)), 
+           shape = guide_legend(override.aes = list(size = 5))) +
+  theme(axis.text.x = element_text(size = 15), axis.text.y.left =  element_text(size = 13), axis.text.y.right =  element_text(size = 13), axis.title.y.left = element_text(size = 13), axis.title.y.right = element_text(size = 14))
+
+# Print the combined plot
+pdf("Figures/Figure3B.pdf", height = 6, width = 10)
+print(p_combined)
+dev.off()
+```
+
+## Figure 3C
+
+```{r, fig.width = 14, fig.height = 5, echo=FALSE}
+df1 = melt(tablex[,c("amountFac", "Cycles Category", "Sequencer", "Prededuplication", "Postdeduplication")],id.vars=c("amountFac","Cycles Category","Sequencer"))
+df1 <- df1 %>% dplyr::rename("Status" = "variable")
+
+p = ggplot(df1, 
+       aes(x = amountFac, y = value, col = Status, shape = Sequencer ,group = interaction(Status, Sequencer))) + 
+  xlab("Amount") + 
+  ylab("Reads mapped %") + 
+  facet_wrap(~`Cycles Category`) + 
+  geom_point(size = 3) + 
+  geom_line() + 
+  theme(axis.text.x = element_text(angle= 45, size = 15, hjust= 1), text = element_text(size = 17)) +
+  scale_color_manual(values=c('Purple','Turquoise'), labels=c('Raw', 'Unique')) + 
+  guides(shape = guide_legend(override.aes = list(size = 5)), color = guide_legend(override.aes = list(size = 5))) 
+pdf("Figures/Figure3C.pdf", height = 5, width = 14)
+p
+dev.off()
+```
+
+##Figure 4A
+
+```{r , fig.align = "center", fig.width = 20, fig.height=16, echo=FALSE, out.width='\\textwidth'}
+dfgenes = NULL
+for (i in colnames(dedupCounts)) {
+        dfgenes[[i]] = rownames(dedupCounts[dedupCounts[,i] > 5,])
+}
+names(dfgenes) = lapply(names(dfgenes), function(x) {setNames( paste0(sampleInfo$amountFac, "_", sampleInfo$`Cycles Category`, "_", sampleInfo$Sequencer), sampleInfo$Id)[[x]]})
+
+
+one = list("Novaseq6000" = dfgenes$'1000_LOW_Novaseq6000', "Aviti" = dfgenes$'1000_LOW_Aviti', "G4" = dfgenes$'1000_LOW_G4', "NovaseqX" = dfgenes$'1000_LOW_NovaseqX')
+two = list("Novaseq6000" = dfgenes$'500_LOW_Novaseq6000', "Aviti" = dfgenes$'500_LOW_Aviti', "G4" = dfgenes$'500_LOW_G4', "NovaseqX" = dfgenes$'500_LOW_NovaseqX')
+three = list("Novaseq6000" = dfgenes$'250_LOW_Novaseq6000', "Aviti" = dfgenes$'250_LOW_Aviti', "G4" = dfgenes$'250_LOW_G4', "NovaseqX" = dfgenes$'250_LOW_NovaseqX')
+four = list("Novaseq6000" = dfgenes$'125_LOW_Novaseq6000', "Aviti" = dfgenes$'125_LOW_Aviti', "G4" = dfgenes$'125_LOW_G4', "NovaseqX" = dfgenes$'125_LOW_NovaseqX')
+
+venn1 <- ggvenn(
+    one,
+    set_name_size = 10, text_size = 16, fill_alpha = 0.2, stroke_size = 0.5) + ggtitle("Shared genes 1000 ng/ LOW PCR category") +
+  theme(plot.title = element_text(hjust = 0.5, size = 35)) + scale_fill_manual(values = c("darkorange", 'chartreuse','darkslateblue', "deeppink3"))
+venn2 <- ggvenn(
+    two,
+    set_name_size = 10, text_size = 16, fill_alpha = 0.2, stroke_size = 0.5) + ggtitle("Shared genes 500 ng/ LOW PCR category") +
+  theme(plot.title = element_text(hjust = 0.5, size = 35)) + scale_fill_manual(values = c("darkorange", 'chartreuse','darkslateblue', "deeppink3"))
+venn3 <- ggvenn(
+    three,
+    set_name_size = 10, text_size = 16, fill_alpha = 0.2, stroke_size = 0.5) + ggtitle("Shared genes 250 ng/ LOW PCR category") +
+  theme(plot.title = element_text(hjust = 0.5, size = 35)) + scale_fill_manual(values = c("darkorange", 'chartreuse','darkslateblue', "deeppink3"))
+venn4 <- ggvenn(
+    four,
+    set_name_size = 10, text_size = 16, fill_alpha = 0.2, stroke_size = 0.5, label_sep = "\n") + ggtitle("Shared genes 125 ng/ LOW PCR category") + 
+  theme(plot.title = element_text(hjust = 0.5, size = 35)) + scale_fill_manual(values = c("darkorange", 'chartreuse','darkslateblue', "deeppink3"))
+
+#plot_grid(venn4, venn3, venn2, venn1, ncol = 2, align="v", rel_widths = c(1, 1))
+
+pdf("Figures/Figure4A.pdf", height = 14, width = 18)
+venn1
+venn2
+venn3
+venn4
+dev.off()
+```
+
+## Figure 4B
+
+```{r , fig.align = "center", fig.width = 7, fig.height=5, echo=FALSE, out.width='\\textwidth'}
+overlap = NULL
+
+for (i in c("1", "2", "4", "7","15","31", "62", "125", "250")){
+  list_of_genes =list(
+    "NovaseqX" = setdiff(
+      unname(unlist(dfgenes[names(dfgenes)[grepl("^1000_.*_NovaseqX", names(dfgenes))]])), 
+      unname(unlist(dfgenes[names(dfgenes)[grepl(paste0("^", i, "_.*_NovaseqX"), names(dfgenes))]]))
+    ),
+    "Novaseq6000" = setdiff(
+      unname(unlist(dfgenes[names(dfgenes)[grepl("^1000_.*_Novaseq6000", names(dfgenes))]])), 
+      unname(unlist(dfgenes[names(dfgenes)[grepl(paste0("^", i, "_.*_Novaseq6000"), names(dfgenes))]]))
+    ),
+    "Aviti" = setdiff(
+      unname(unlist(dfgenes[names(dfgenes)[grepl("^1000_.*_Aviti", names(dfgenes))]])), 
+      unname(unlist(dfgenes[names(dfgenes)[grepl(paste0("^", i, "_.*_Aviti"), names(dfgenes))]]))
+    ),
+    "G4" = setdiff(
+      unname(unlist(dfgenes[names(dfgenes)[grepl("^1000_.*_G4", names(dfgenes))]])), 
+      unname(unlist(dfgenes[names(dfgenes)[grepl(paste0("^", i, "_.*_G4"), names(dfgenes))]]))
+    )
+  )
+  result <- Reduce(intersect, list_of_genes)
+  list_of_genes = lapply(list_of_genes, function(x){(length(result)*100)/length(x)})
+  list_of_genes = data.frame("percentage" = t(data.frame(list_of_genes)))
+  list_of_genes$Amount = i
+  list_of_genes = list_of_genes %>% rownames_to_column()
+  overlap[[i]] = list_of_genes
+}
+
+pdf("Figures/Figure4B.pdf", width = 7, height=5)
+bind_rows(overlap) %>% ggplot(aes(factor(Amount, levels = c("1", "2", "4", "7","15","31", "62",  "125", "250")), percentage, fill = rowname)) + geom_col(position = "dodge") + scale_fill_manual(values = c( 'chartreuse','darkslateblue', "darkorange","deeppink3")) + labs(x = "Amount (ng)", y = "Percentage the missing genes shared between sequencers", fill = "Sequencer") + theme(axis.text.x = element_text(size = 14))
+dev.off()
+
+```
+
+## Figure 4C
+
+```{r , fig.align = "center", fig.width = 11, fig.height=6, echo=FALSE, out.width='\\textwidth'}
+library(ComplexHeatmap)
+consistently_missing = NULL
+
+for (i in c("1", "2", "4", "7","15","31")){
+  for(x in c("NovaseqX", "Novaseq6000", "Aviti", "G4")){
+    name = paste0(i, "_", x)
+    result = setdiff(
+      unname(unlist(dfgenes[names(dfgenes)[grepl(paste0("^1000_.*_",x), names(dfgenes))]])), 
+      unname(unlist(dfgenes[names(dfgenes)[grepl(paste0("^", i, "_.*_",x), names(dfgenes))]])))
+    consistently_missing[[name]] = result
+  }
+}
+
+subgroup = setNames(sapply(str_split(names(consistently_missing), "_"), .subset ,2),names(consistently_missing))
+
+ann_colors <- list("Sequencer" = c(
+    "Aviti" = "chartreuse", 
+    "G4" = "darkslateblue",
+    "Novaseq6000" = "darkorange",
+    "NovaseqX" = "deeppink3"
+))
+
+pdf("Figures/Figure4C.pdf", width = 6, height=6)
+m1 = ComplexHeatmap::make_comb_mat(consistently_missing)
+m1 = m1[comb_size(m1) >= 192]
+m = ComplexHeatmap::UpSet(
+    m1, 
+    comb_order = order(comb_size(m1)), 
+    set_order = names(consistently_missing),
+
+    top_annotation = HeatmapAnnotation(
+        "Intersections" = anno_barplot(
+            comb_size(m1),  
+            ylim = c(0, max(comb_size(m1)) * 1.1),
+            border = FALSE, 
+            gp = gpar(fill = "black"),  
+            height = unit(4, "cm")
+        ), 
+        annotation_name_side = "left", 
+        annotation_name_rot = 90
+    ),
+    
+    left_annotation = rowAnnotation(
+        Sequencer = subgroup[set_name(m1)], 
+        col = list(Sequencer = ann_colors$Sequencer),  
+        show_annotation_name = FALSE
+    ),
+    right_annotation = upset_right_annotation(m1)
+)
+
+draw(m, padding = unit(c(6, 6, 6, 6), "mm"))
+od = column_order(m)
+decorate_annotation("Intersections", {
+  grid.text(comb_size(m1)[od], x = seq_along(comb_size(m1)), y = unit(comb_size(m1)[od], "native") + unit(2, "pt"),  default.units = "native", just = c("left", "bottom"),  gp = gpar(fontsize = 11, col = "#404040"), rot = 90)
+  })
+dev.off()
+
+```
+
+
+## Figure 4D
+
+```{r , fig.align = "center", fig.width = 8, fig.height=8, echo=FALSE, out.width='\\textwidth'}
+subset_counts = dedupCounts[,grepl("1000", colnames(dedupCounts))]
+subset_counts = subset_counts[rowSums(subset_counts == 0) == 0, ]
+
+dfx = protcodingAnno %>% 
+  mutate(cat = case_when(rownames(protcodingAnno)  %in% Reduce(intersect, consistently_missing) ~ "missing in 1 ng - 31 ng", 
+                         rownames(protcodingAnno)  %in% Reduce(intersect, consistently_missing[!grepl("31", names(consistently_missing))]) ~ "missing in 1 ng - 15 ng",
+                         rownames(protcodingAnno)  %in% Reduce(intersect, consistently_missing[c(1:16)]) ~ "missing in 1 ng - 7 ng",
+                        .default = "Rest" ))
+dfx$cat = factor(dfx$cat, levels = c("missing in 1 ng - 7 ng", "missing in 1 ng - 15 ng", "missing in 1 ng - 31 ng", "Rest"))
+lev <- levels(as.factor(dfx$cat)) 
+L.pairs <- combn(seq_along(lev), 2, simplify = FALSE, FUN = function(i) lev[i])
+
+pdf("Figures/Figure4D.pdf", height = 7, width = 5)
+ggplot(melt(merge(subset_counts, dfx[,c(2,16)], by = "row.names", all = TRUE), id.vars = c("gene_name", "cat", "Row.names")), aes(cat,value)) + geom_violin() + scale_y_log10() + stat_compare_means(comparisons = L.pairs[c(3,5,6)],
+    label = "p.signif", method = "wilcox.test", p.adjust.method = "bonferroni",paired = FALSE,
+    symnum.args = list(
+        cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 0.1, 1),
+        symbols = c("****", "***", "**", "*")
+    ) 
+) + theme_bw() + theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1), text = element_text(size = 15)) + stat_summary(fun.y=mean, colour = "red")  + labs(x = "", y = "Gene counts") + ggtitle("1000 ng")
+dev.off()
+```
+
+## Figure 4E
+
+```{r , fig.align = "center", fig.width = 16, fig.height=6, echo=FALSE, out.width='\\textwidth'}
+#Prepare sample metadata
+df = tablex[tablex$amountFac != "NC", c("amountFac", "Cycles Category", "Sample", "Sequencer", "Detected_genes")]
+df$Amount = factor(df$amountFac, levels = c("1", "2", "4", "7","15","31", "62", "125", "250", "500","1000"))
+df  = df %>% dplyr::rename("CyclesCategory" = "Cycles Category") %>% dplyr::rename("Genes" = 'Detected_genes')
+df$CyclesCategory = factor(df$CyclesCategory, levels = c("LOW", "MID", "HIGH"))
+df$inter <- interaction(as.factor(df$Amount), as.factor(df$CyclesCategory))
+df$Sequencer = factor(df$Sequencer, levels = c("Aviti", "G4", "Novaseq6000", "NovaseqX"))
+df = df %>% arrange(Sequencer, Amount, CyclesCategory)
+df$Id = paste0(df$Sample, "_", df$Sequencer)
+
+#Filter for genes only found to be expressed in all and normalise
+columns_of_interest = colnames(dedupCounts)[!grepl("^0_", colnames(dedupCounts))]
+countsPCA = dedupCounts[, columns_of_interest]
+countsPCA = countsPCA[rowSums(countsPCA == 0) == 0, ]
+readCds <- DGEList(counts = countsPCA, group = factor(sampleInfo$amountFac[!grepl("^NC", sampleInfo$amountFac)], levels = c("1", "2", "4", "7","15","31", "62", "125", "250", "500","1000")), samples = sampleInfo$Id[!grepl("^0_", sampleInfo$Id)])
+readCds <- calcNormFactors(readCds, method = "TMM")
+readSf <- 1 / (readCds$samples$norm.factors * readCds$samples$lib.size)
+readSf <- readSf / ezGeomean(readSf)
+readLogSig <- log2(ezScaleColumns(countsPCA, readSf) + 1)
+logRatio <- sweep(readLogSig, 1, rowMeans(readLogSig))
+row_sds <- apply(readLogSig, 1, sd)
+top_2000_indices <- order(row_sds, decreasing = TRUE)
+logRatio <- logRatio[top_2000_indices, ]
+lim <- c(-6, 6)
+design <- ezFrame(sampleInfo[ sampleInfo$amountFac != "NC", c("amountFac", "Cycles Category", "Sequencer", "Id")])
+rownames(design) = design$Id
+design$CyclesCategory = factor(design$'Cycles Category', levels = c("LOW", "MID", "HIGH"))
+design$Amount = factor(design$amount,levels= c("1", "2", "4", "7", "15", "31", "62", "125", "250", "500", "1000"))
+design = design[order(design$Amount) , ]
+design = design[,-1]
+
+colors2 <- amount_colors
+ann_colors <- list(Sequencer = c("Aviti" = "chartreuse", 
+                                 "G4" = "darkslateblue",
+                                 "Novaseq6000" = "darkorange",
+                                 "NovaseqX" = "deeppink3"),
+                   CyclesCategory = c("LOW" = "skyblue",
+                                      "MID" = "yellowgreen",
+                                      "HIGH" = "orangered"), 
+                   Amount = c("1" = colors2[1],
+                              "2" = colors2[2],
+                              "4" = colors2[3],
+                              "7" = colors2[4],
+                              "15" = colors2[5],
+                              "31" = colors2[6],
+                              "62" = colors2[7],
+                              "125" = colors2[8],
+                              "250" = colors2[9],
+                              "500" = colors2[10],
+                              "1000" = colors2[11])) 
+#GCTable[ , df[with(df, order(amountFac, `Cycles Category`, Sequencer)),]$Id]
+pdf("Figures/Figure4E.pdf", height = 5, width = 7)
+pheatmap(logRatio[, df[with(df, order(amountFac, CyclesCategory, Sequencer)),]$Id], color=getBlueRedScale(), clustering_method="ward.D2",
+              breaks=seq(from=lim[1], to=lim[2], length.out=257),
+              scale="row", 
+              cluster_rows=TRUE,
+              cluster_cols=FALSE,
+              show_rownames=FALSE, 
+              show_colnames=FALSE,
+              annotation_col = design[match(df[with(df, order(amountFac, CyclesCategory, Sequencer)),]$Id, rownames(design)),c(-1,-3)],
+              annotation_colors = ann_colors,
+              name = "logRatio"
+)
+dev.off()
+```
+
+## Figure 4F
+
+```{r , fig.width = 10, fig.height=7, echo=FALSE}
+
+# Define formula
+form <- ~ Amount + `Cycles Category` + Sequencer
+
+# Compute variance partitioning
+varPart <- fitExtractVarPartModel(readLogSig ,form, sampleInfo %>% column_to_rownames("Id") %>% filter(Amount != "0"))
+names(varPart) = c("Amount", "PCR Cycles", "Sequencer", "Residuals")
+# Plot variance explained
+pdf("Figures/Figure4F.pdf", width = 7, height=4)
+plotVarPart(varPart) + theme(text = element_text(size = 15))
+dev.off()
+```
+
+
+## Figure 5A
+
+```{r , fig.width = 15, fig.height=15, echo=FALSE}
+comb_allseq = ezFrame(dedupCounts)
+comb_allseq = comb_allseq[,colnames(comb_allseq)[!grepl("^0_", colnames(comb_allseq))]]
+comb_allseq = melt(comb_allseq %>% rownames_to_column()) %>% separate(variable, into = c("amount", "cycles", "Sequencer"), sep = "_") %>% rename("Gene_names" = "rowname")
+
+comb_allseq$cycles <- as.integer(comb_allseq$cycles)
+comb_allseq$amount = factor(comb_allseq$amount, levels = c("1", "2", "4", "7", "15", "31", "62", "125", "250", "500", "1000"))
+
+pdf("Figures/Figure5A.pdf", width = 15, height = 10)
+par(mfrow=c(2,3), mar = c(6, 6, 6, 6))
+
+for (i in levels(comb_allseq$amount)[c(4:8,11)]) {
+  
+  cycles_max <- max(unique(comb_allseq[comb_allseq$amount == i,]$cycles))
+  cycles_min <- min(unique(comb_allseq[comb_allseq$amount == i,]$cycles))
+  X <- comb_allseq[comb_allseq$amount == i & comb_allseq$cycles %in% c(cycles_max, cycles_min),]
+  X <- merge(X[X$cycles == cycles_max,] %>% dplyr::select(value, amount, Sequencer, Gene_names) %>% rename("value_HC" = "value"), X[X$cycles == cycles_min,] %>% dplyr::select(value, amount, Sequencer, Gene_names) %>% rename("value_LC" = "value"), by = c("Gene_names", "amount", "Sequencer"))
+  plot(X$value_HC + 5, X$value_LC + 5, log = "xy", pch = 19, col = c('chartreuse','darkslateblue', "darkorange","deeppink3"), xlab = "HIGH", ylab = "LOW", main = i, cex.main = 3, cex.lab= 3)
+  legend("topleft", legend = levels(factor(X$Sequencer)), pch = 19, col = c('chartreuse','darkslateblue', "darkorange","deeppink3"), cex = 1.5)
+  x = cor.test(X$value_HC, X$value_LC,  method = "pearson")
+  legend(x='bottomright', legend=paste('R=', round(x$estimate,4), ", P-value = ", round(x$p.value,4)), cex = 2)
+  abline(a = 0, b = 1, col = "red", lwd = 2, lty = 2)
+}
+dev.off()
+```
+
+
+## Figure 5B
+
+```{r , fig.width = 8, fig.height=3, echo=FALSE}
+percTop <- as.data.frame(apply(countsPCA, 2, function(x) (sum(sort(x, decreasing = TRUE)[1:20]) / sum(x))* 100)) %>% rownames_to_column()
+colnames(percTop) = c("Sample", "PercTopCounts")
+percTop = percTop %>% separate(Sample, into = c("Amount", "cycles", "Sequencer"), sep = "_")
+percTop = merge(percTop, sampleInfo, by = c("Amount", "cycles", "Sequencer"))
+percTop = percTop[percTop$Amount != "0",]
+percTop$Amount = factor(percTop$Amount, levels = c("1", "2", "4", "7", "15", "31", "62", "125", "250", "500", "1000"))
+
+pdf("Figures/Figure5B.pdf", width = 6, height = 3)
+ggplot(percTop, aes(Amount, PercTopCounts, color = `Cycles Category`, shape = Sequencer)) + 
+  geom_point(size = 2.5) + 
+  scale_color_manual(values = c("skyblue", "yellowgreen", "orangered")) + 
+  labs(x = "Amount (ng)", y = "Percentage of reads in top 20 genes", color = "PCR Cycles Category") + theme(axis.title.y = element_text(size = 10))
+dev.off()
+```
+
+## Figure 5C
+
+```{r , fig.width = 13, fig.height=4, echo=FALSE}
+dataInfoSorted <- dataInfo[dataInfo$Amount != "0",]
+dataInfoSorted <- dataInfoSorted[ order(dataInfoSorted$Amount, dataInfoSorted$`Cycles Category`), ]
+idList <- split(dataInfoSorted$Id, paste(dataInfoSorted$Amount, dataInfoSorted$`Cycles Category`))
+mySet <- names(idList)[1]
+
+corrBySample <- sapply(idList, function(idx){
+  df = dedupCounts[ ,idx]
+  df = df[rowSums(df == 0) == 0, ]
+  dedupCorr <- cor(df, method = "spearman")
+  dedupCorr[upper.tri(dedupCorr)]
+})
+
+xLong <- reshape2::melt(corrBySample)
+xLong$Var2 <- factor(xLong$Var2, levels=unique(paste(dataInfoSorted$Amount, dataInfoSorted$`Cycles Category`)))
+xLong1 <- ezFrame(xLong, type="unique")
+
+corrBySample <- sapply(idList, function(idx){
+  df = rawCounts[ ,idx]
+  df = df[rowSums(df == 0) == 0, ]
+  rawCorr <- cor(df, method = "spearman")
+  rawCorr[upper.tri(rawCorr)]
+})
+
+xLong <- reshape2::melt(corrBySample)
+xLong$Var2 <- factor(xLong$Var2, levels=unique(paste(dataInfoSorted$Amount, dataInfoSorted$`Cycles Category`)))
+xLong2 <- ezFrame(xLong, type="raw")
+xLong <- rbind(xLong1, xLong2)
+
+xLong <- xLong %>% separate(Var2, c("amountFac", "Cycles Category"), " ")
+xLong$amountFac <- factor(xLong$amountFac, levels=c("1", "2", "4", "7", "15", "31", "62", "125", "250", "500", "1000"))
+xLong$`Cycles Category` = factor(xLong$`Cycles Category`, levels = c("LOW", "MID", "HIGH"))
+
+pdf("Figures/Figure5C.pdf", width = 11, height = 4)
+ggplot(xLong %>% group_by(amountFac, `Cycles Category`, type) %>% summarise(median = median(value)), 
+       aes(x = amountFac, y = median, col = type, group = type)) + 
+    labs(x = "Amount (ng)", y = "Median Correlation", color = "Status") +
+    facet_wrap(~`Cycles Category`) + 
+    geom_point(size = 3) + geom_line() + 
+    theme(axis.text.x = element_text(size = 15, angle= 45, hjust= 1), text = element_text(size = 17)) +
+    scale_color_manual(values=c('Purple','Turquoise'), labels=c('Raw', 'Unique')) + 
+    guides( color = guide_legend(override.aes = list(size = 5))) 
+dev.off()
+```
+
+## Supplementary Figure 3
+
+```{r , fig.align = "center", fig.width = 8, fig.height=8, echo=FALSE, out.width='\\textwidth'}
+
+dfx = protcodingAnno %>% 
+  mutate(cat = case_when(rownames(protcodingAnno)  %in% Reduce(intersect, consistently_missing) ~ "missing in 1 ng - 31 ng", 
+                         rownames(protcodingAnno)  %in% Reduce(intersect, consistently_missing[!grepl("31", names(consistently_missing))]) ~ "missing in 1 ng - 15 ng",
+                         rownames(protcodingAnno)  %in% Reduce(intersect, consistently_missing[c(1:16)]) ~ "missing in 1 ng - 7 ng",
+                        .default = "Rest" ))
+dfx$cat = factor(dfx$cat, levels = c("missing in 1 ng - 7 ng", "missing in 1 ng - 15 ng", "missing in 1 ng - 31 ng", "Rest"))
+lev <- levels(as.factor(dfx$cat)) 
+L.pairs <- combn(seq_along(lev), 2, simplify = FALSE, FUN = function(i) lev[i])
+
+p1 = ggplot(dfx,aes(cat, gc)) + geom_violin() + stat_compare_means(
+  comparisons = L.pairs[c(3,5,6)],
+  label = "p.signif", method = "wilcox.test", p.adjust.method = "bonferroni",paired = FALSE,
+  symnum.args = list(
+    cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 0.1, 1),
+    symbols = c("****", "***", "**", "*")
+  )
+) + theme_bw() + theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),text = element_text(size = 15)) + stat_summary(fun.y=mean, colour = "red") + geom_hline(yintercept = 0.5, colour = "red") + labs(x = "", y = "GC content")+ ylim(0,1.1)
+
+p2 = ggplot(dfx,aes(cat, featWidth)) + geom_violin() + stat_compare_means(
+  comparisons = L.pairs[c(3,5,6)],
+  label = "p.signif", method = "wilcox.test", p.adjust.method = "bonferroni",paired = FALSE,
+  symnum.args = list(
+    cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 0.1, 1),
+    symbols = c("****", "***", "**", "*")
+  ) 
+) + theme_bw() + theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1), text = element_text(size = 15)) + stat_summary(fun.y=mean, colour = "red") + geom_hline(yintercept = 2000, colour = "red") + labs(x = "", y = "Gene length") + ylim(0,20000)
+
+pdf("Figures/SupplementaryFigure3.pdf", width = 5, height=8)
+p1/p2 + plot_layout(axes = "collect") 
+dev.off()
+```
+
+## Supplementary Figure 4
+
+```{r , fig.width = 11, fig.height=6, echo=FALSE}
+
+x = melt(dedupCounts) %>% separate(Var2, into = c("Amount", "PCR_cycles", "Sequencer"))
+x = x[as.integer(x$Amount) >= 7,]
+x = merge(x, protcodingAnno[,c(10,11)], by.x = "Var1", by.y = "row.names")
+
+all = NULL
+for (j in unique(x$Sequencer)){
+  list_of_genes_low = unique(x[x$Sequencer == j & as.integer(x$Amount) < 62 & x$value > 5,]$Var1)
+  list_of_genes_high = unique(x[x$Sequencer == j & as.integer(x$Amount) > 125 & x$value > 5,]$Var1)
+  list_of_genes_high_unique = list_of_genes_high[!list_of_genes_high %in% list_of_genes_low]
+  list_of_genes_both = list_of_genes_low[list_of_genes_low %in% list_of_genes_high]
+  list_of_genes_low_unique = list_of_genes_low[!list_of_genes_low %in% list_of_genes_high]
+  df = x[x$Sequencer == j & x$value > 5 & x$Amount %in% c("7", "15", "31", "250", "500", "1000"),]
+  df = df %>% mutate(Label = case_when(Var1 %in% list_of_genes_high_unique ~ "only in high (250,500,1000)",
+                                       Var1 %in% list_of_genes_both ~ "in both",
+                                       Var1 %in% list_of_genes_low_unique ~ "only in low (7,15,31)"))
+  df = df[,c(1,4,5,6,7,8)]
+  df = df[!duplicated(df),]
+  all = rbind(all, df)
+}
+
+
+p1 = ggplot(all[all$Label != "only in low (7,15,31)",], aes(Sequencer, featWidth, color = Label)) + geom_violin() + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) + scale_color_manual(values = c("lightgreen", "darkblue"))
+p2 = ggplot(all[all$Label != "only in low (7,15,31)",], aes(Sequencer, gc, color = Label)) + geom_violin() + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) + scale_color_manual(values = c("lightgreen", "darkblue"))
+
+pdf("Figures/SupplementaryFigure4.pdf",width = 8, height=6)
+p1 /p2 +
+    plot_layout(guides = 'collect')
+dev.off()
+```
+
+## Supplementary Figure 5
+
+```{r , fig.width = 15, fig.height=15, echo=FALSE}
+comb_allseq = ezFrame(dedupCounts)
+comb_allseq = comb_allseq[,colnames(comb_allseq)[!grepl("^0_", colnames(comb_allseq))]]
+comb_allseq = melt(comb_allseq %>% rownames_to_column()) %>% separate(variable, into = c("amount", "cycles", "Sequencer"), sep = "_") %>% rename("Gene_names" = "rowname")
+
+comb_allseq$cycles <- as.integer(comb_allseq$cycles)
+comb_allseq$amount = factor(comb_allseq$amount, levels = c("1", "2", "4", "7", "15", "31", "62", "125", "250", "500", "1000"))
+
+pdf("Figures/SupplementaryFigure5.pdf", width = 14, height = 15)
+par(mfrow=c(3,4))
+
+for (i in levels(comb_allseq$amount)) {
+  
+  cycles_max <- max(unique(comb_allseq[comb_allseq$amount == i,]$cycles))
+  cycles_min <- min(unique(comb_allseq[comb_allseq$amount == i,]$cycles))
+  X <- comb_allseq[comb_allseq$amount == i & comb_allseq$cycles %in% c(cycles_max, cycles_min),]
+  X <- merge(X[X$cycles == cycles_max,] %>% dplyr::select(value, amount, Sequencer, Gene_names) %>% rename("value_HC" = "value"), X[X$cycles == cycles_min,] %>% dplyr::select(value, amount, Sequencer, Gene_names) %>% rename("value_LC" = "value"), by = c("Gene_names", "amount", "Sequencer"))
+  
+  plot(X$value_HC + 5, X$value_LC + 5, log = "xy", pch = 19, col = c('chartreuse','darkslateblue', "darkorange","deeppink3"), xlab = "HIGH", ylab = "LOW", main = i, cex.main = 3, cex.lab= 1.5)
+  legend("topleft", legend = levels(factor(X$Sequencer)), pch = 19, col = c('chartreuse','darkslateblue', "darkorange","deeppink3"), cex = 1.5)
+  x = cor.test(X$value_HC, X$value_LC,  method = "pearson")
+  legend(x='bottomright', legend=paste('R=', round(x$estimate,4), ", P-value = ", round(x$p.value,4)), cex = 1.3)
+}
+dev.off()
+
+```
+
+## Extra {.tabset}
+
+### PCA
+
+```{r , fig.width = 10, fig.height=7, echo=FALSE}
+
+columns_of_interest = colnames(dedupCounts)[!grepl("^0_", colnames(dedupCounts))]
+countsPCA = dedupCounts[, columns_of_interest]
+countsPCA = countsPCA[rowSums(countsPCA == 0) == 0, ]
+readCds <- DGEList(counts = countsPCA, group = factor(sampleInfo$amountFac[!grepl("^NC", sampleInfo$amountFac)], levels = c("1", "2", "4", "7","15","31", "62", "125", "250", "500","1000")), samples = sampleInfo$Id[!grepl("^0_", sampleInfo$Id)])
+readCds <- calcNormFactors(readCds, method = "TMM")
+readSf <- 1 / (readCds$samples$norm.factors * readCds$samples$lib.size)
+readSf <- readSf / ezGeomean(readSf)
+readLogSig <- log2(ezScaleColumns(countsPCA, readSf) + 1)
+res.pca <- prcomp(t(readLogSig))
+
+res_pca = merge(data.frame(res.pca$x) %>% rownames_to_column("Id"), dataInfo, by = "Id") 
+res_pca$Amount = factor(res_pca$Amount , levels = c("1", "2", "4", "7", "15", "31", "62", "125", "250", "500", "1000"))
+res_pca$CyclesCategory = factor(res_pca$`Cycles Category`, levels = c("LOW", "MID", "HIGH"))
+
+p1 = ggplot(res_pca, aes(PC1, PC2, color = Amount, shape = Sequencer)) + geom_point(size = 5) + scale_color_manual(values = amount_colors) + labs(x = "PC1 [25.2%]", y = "PC2 [7.6%]") + theme_bw()
+
+# plot_ly(
+#     x = res_pca$PC1, 
+#     y = res_pca$PC2, 
+#     z = res_pca$PC3, 
+#     type = "scatter3d", 
+#     mode = "markers", 
+#     color = res_pca$Amount,  # Discrete categories
+#     colors = viridis_colors  # Use Viridis colors for discrete values
+# )
+#for checking the percentage of explained variance (fviz_pca_ind(res.pca, axes = c(1,2)))
+
+p2 = ggplot(res_pca, aes(PC1, PC2, color = `Cycles Category`, shape = Sequencer)) + geom_point(size = 5) + scale_color_manual(values = cycles_colors) + labs(x = "PC1 [25.2%]", y = "PC2 [7.6%]") + theme_bw()
+
+#Final PCA
+
+p1 + p2  +
+    plot_layout(guides = 'collect')
+
+#Scree plot
+fviz_eig(res.pca, addlabels = TRUE)
+```
+
+### UMAP
+
+```{r , fig.width = 10, fig.height=7, echo=FALSE}
+
+columns_of_interest = colnames(dedupCounts)[!grepl("^0_", colnames(dedupCounts))]
+countsPCA = dedupCounts[, columns_of_interest]
+countsPCA = countsPCA[rowSums(countsPCA == 0) == 0, ]
+readCds <- DGEList(counts = countsPCA, group = factor(sampleInfo$amountFac[!grepl("^NC", sampleInfo$amountFac)], levels = c("1", "2", "4", "7","15","31", "62", "125", "250", "500","1000")), samples = sampleInfo$Id[!grepl("^0_", sampleInfo$Id)])
+readCds <- calcNormFactors(readCds, method = "TMM")
+readSf <- 1 / (readCds$samples$norm.factors * readCds$samples$lib.size)
+readSf <- readSf / ezGeomean(readSf)
+readLogSig <- log2(ezScaleColumns(countsPCA, readSf) + 1)
+umap = umap(t(readLogSig), n_components = 2, random_state = 15) 
+layout <- umap[["layout"]] 
+layout <- data.frame(layout) 
+umapx = merge(layout, sampleInfo, by.x = "row.names", by.y = "Id")
+
+colors2 <- amount_colors
+
+
+ggplot(umapx, aes(X1, X2, color = amountFac, shape = Sequencer)) + 
+  geom_point(aes(size = `Cycles Category`)) + 
+  scale_color_manual(values = amount_colors) + 
+  theme(legend.text = element_text(size = 11)) + 
+  guides(shape = guide_legend(override.aes = list(size = 5)), color = guide_legend(override.aes = list(size = 5))) + 
+  labs (color = "Amount", size = "PCR Cycles Category", shape = "Sequencer")
+
+```
+
+
+### Distribution of GC content
+
+```{r , fig.width = 10, fig.height=5, echo=FALSE}
+#Run qualimap
+# resBaseDir <- "/srv/GT/analysis/p2220/PCR-duplicates-study/qualimap-dedup"
+# if (!file.exists(resBaseDir)){
+#   dir.create(resBaseDir, recursive = TRUE)
+# }
+# 
+ # for (seqr in names(dedupFolders)){
+ #   bamFiles <- list.files(dedupFolders[seqr], pattern=".*dedup.bam", full.names=TRUE)
+ #   sampleNames <- sub(".dedup.bam", "", basename(bamFiles))
+ #   sampleNames <- sub("_S.*", "", sampleNames)
+ #   names(bamFiles) <- sampleNames
+ #   for (sm in unique(sampleInfo$Sample)){
+ #     resDir <- paste0(resBaseDir, "/", sm, "_", seqr)
+ #     message(resDir)
+ #     cmd <- paste("unset DISPLAY; /usr/local/ngseq/packages/QC/Qualimap/2.2.1/qualimap bamqc -bam", bamFiles[sm], "--java-mem-size=4G", "-c -nw 400 -hm 3 -nt 8", "-outdir", resDir)
+ #     ezSystem(cmd)
+ #   }
+ # }
+
+
+files = list.files("/srv/GT/analysis/p2220/PCR-duplicates-study/qualimap_NovaseqX100bp_dedup/", pattern = "mapped_reads_gc-content_distribution.txt", recursive = TRUE)
+files = paste0("/srv/GT/analysis/p2220/PCR-duplicates-study/qualimap_NovaseqX100bp_dedup/", files)
+sample_names = list.files("/srv/GT/analysis/p2220/PCR-duplicates-study/qualimap_NovaseqX100bp_dedup/")
+GCfiles = data.frame("File" = files, "Sample" = sample_names)
+
+GCTable = read_delim(GCfiles$File[1])
+colnames(GCTable) = c("GC_Content", GCfiles[GCfiles$File == GCfiles$File[1],]$Sample)
+for (i in GCfiles$File[-1]){
+  name = GCfiles[GCfiles$File == i,]$Sample
+  x = read_delim(i)
+  colnames(x) = c("GC_Content", name)
+  GCTable = merge(GCTable, x, by = "GC_Content")
+}
+
+GCTableM = melt(GCTable, id.vars = "GC_Content") %>% separate(variable, into = c("Amount", "cycles", "Sequencer"))
+GCTableM = merge(GCTableM, sampleInfo, by = c("Amount", "cycles", "Sequencer"))
+GCTableM = GCTableM[GCTableM$Amount != "0",]
+GCTableM$amountFac = factor(GCTableM$amountFac, levels = levels(GCTableM$amountFac)[-1])
+
+
+ggplot(GCTableM, aes(GC_Content, value, color = Sequencer)) + geom_line() + facet_grid(amountFac ~`Cycles Category`) + labs(x = "GC content %", y = "Fraction of reads", color = "Amount")
+
+```
