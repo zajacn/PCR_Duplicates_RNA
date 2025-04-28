@@ -244,7 +244,7 @@ mismatchRate = reshape2::melt(mismatchRate, id.vars = "Sample")
 mismatchRate$Sample = factor(mismatchRate$Sample, levels = unique(paste0(dataInfo[with(dataInfo, order(amountFac, `Cycles Category`)),]$amountFac, "_", dataInfo[with(dataInfo, order(amountFac, `Cycles Category`)),]$`Cycles Category`)))
 mismatchRate$variable = factor(mismatchRate$variable, levels = c("Aviti", "G4", "Novaseq6000", "NovaseqX"))
 
-pdf("Figures/Figure2B.pdf", width = 7, height = 7)
+pdf("s/Figure2B.pdf", width = 7, height = 7)
 ggplot(mismatchRate, aes(x=Sample, y=value, group=variable, color=variable)) +
   geom_step(position="jitter", direction="mid") +
   theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1), axis.title.y = element_text(size =15),legend.text = element_text(size = 15), legend.title = element_text(size = 15), legend.position = "top") + 
@@ -372,7 +372,7 @@ saveWorkbook(OUT, "Figures/Supplementary.data.xlsx")
 ```
 
 
-##Figure 3B
+## Figure 3B
 
 ```{r , fig.width = 10, fig.height=6, echo=FALSE}
 
@@ -434,7 +434,7 @@ p
 dev.off()
 ```
 
-##Figure 4A
+## Figure 4A
 
 ```{r , fig.align = "center", fig.width = 20, fig.height=16, echo=FALSE, out.width='\\textwidth'}
 dfgenes = NULL
